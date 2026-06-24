@@ -117,6 +117,12 @@ public class MainActivity extends Activity {
         );
 
         web.setWebViewClient(new WebViewClient());
+        web.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override
+            public void onPermissionRequest(android.webkit.PermissionRequest request) {
+                request.grant(request.getResources());
+            }
+        });
         web.setScrollBarStyle(WebView.SCROLLBARS_INSIDE_OVERLAY);
         web.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
 
@@ -2052,7 +2058,6 @@ public class MainActivity extends Activity {
         // Тот же принцип, что pickWallpaperFile() выше, но для загрузки файла
         // в Store (картинка ИЛИ видео-обои для публикации) — отдельный код
         // запроса, чтобы результат шёл в другое JS-событие.
-        @JavascriptInterface
         // ── Сохраняет скачанный HTML-файл обновления во внутреннее хранилище ──
         // При следующем старте MainActivity проверит этот файл и загрузит
         // его вместо assets/index.html (см. логику в onCreate выше).
