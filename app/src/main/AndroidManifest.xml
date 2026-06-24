@@ -17,7 +17,6 @@
 
     <application
         android:label="XOMNIA OS"
-        android:icon="@drawable/ic_launcher"
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="true">
 
