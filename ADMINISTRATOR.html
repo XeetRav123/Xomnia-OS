@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #080810; color: #ccc;
+  font-family: monospace; font-size: 12px;
+  padding: 10px; overflow-y: auto; min-height: 100vh;
+}
+#dropZone {
+  width: 100%; min-height: 78px; border: 2px dashed #333; border-radius: 10px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; color: #555; padding: 12px; margin-bottom: 8px;
+  transition: border-color .2s, color .2s; gap: 4px;
+}
+#dropZone.over  { border-color: #0f8 !important; color: #0f8 !important; }
+#dropZone.ready { border-color: #0f8; color: #0f8; }
+input, textarea {
+  width: 100%; background: #0d0d1a; border: 1px solid #2a2a3a; color: #cdf;
+  font-family: monospace; font-size: 11px; padding: 7px 9px; border-radius: 5px;
+  outline: none; display: block; margin-bottom: 6px;
+}
+input:focus, textarea:focus { border-color: #4af; }
+textarea { resize: vertical; height: 68px; }
+.btn {
+  background: rgba(60,60,80,.8); border: 1px solid rgba(255,255,255,.18);
+  color: #fff; font-family: monospace; font-size: 11px;
+  padding: 7px 10px; border-radius: 5px; cursor: pointer;
+  width: 100%; margin-bottom: 5px; text-align: center;
+}
+.btn:active { opacity: .7; }
+.row { display: flex; gap: 6px; margin-bottom: 5px; }
+.row .btn { margin-bottom: 0; }
+.btn-pub { background: #0f2a60; border-color: #2a5fd6; font-size: 13px; padding: 11px; margin-top: 4px; margin-bottom: 6px; }
+#browser {
+  display: none; border: 1px solid #1a1a2a; border-radius: 6px;
+  max-height: 190px; overflow-y: auto; background: #090912; margin-bottom: 6px;
+}
+.br-hd {
+  padding: 4px 8px; border-bottom: 1px solid #1a1a2a; font-size: 9px;
+  color: #7dd3fc; display: flex; gap: 8px; align-items: center;
+  position: sticky; top: 0; background: #090912;
+}
+.br-it { padding: 6px 10px; border-bottom: 1px solid #111; cursor: pointer; }
+.br-it:active { background: rgba(255,255,255,.06); }
+#fst { font-size: 10px; color: #888; min-height: 14px; margin-bottom: 4px; }
+#pst { font-size: 10px; color: #888; min-height: 14px; text-align: center; margin-top: 2px; }
+.sep { border: none; border-top: 1px solid #1a1a28; margin: 8px 0; }
+label { font-size: 10px; color: #666; display: block; margin-bottom: 3px; }
+</style>
+</head>
+<body>
+<div id="dropZone"
+  ondragover="event.preventDefault();dz().classList.add('over')"
+  ondragleave="dz().classList.remove('over')"
+  ondrop="onDrop(event)">
+  <div style="font-size:24px">📂</div>
+  <div id="dropLabel">Перетащи index.html из Files</div>
+  <div style="font-size:9px;color:#444">или кнопки ниже</div>
+</div>
+<div id="fst"></div>
+
+<div class="row">
+  <button class="btn" onclick="autoFind()">🔍 Авто-поиск</button>
+  <button class="btn" onclick="toggleBr()">📁 Обзор</button>
+</div>
+<div id="browser"></div>
+<hr class="sep">
+
+<label>🔑 Секретный ключ (ADMIN_SECRET)</label>
+<input id="key" type="password" placeholder="Введи ключ">
+<label>📌 Версия</label>
+<input id="ver" placeholder="напр. 1.0.2">
+<label>📝 Что нового</label>
+<textarea id="cl" placeholder="— Каждый пункт с новой строки"></textarea>
+
+<button class="btn btn-pub" onclick="pub()">🚀 Опубликовать обновление</button>
+<div id="pst"></div>
+
+<script>
+// ── Bridge: Android инжектирует в ВСЕ фреймы WebView ─────────────
+var And = (typeof Android !== 'undefined') ? Android : null;
+
+// ── Config из localStorage (установил родитель в openAdminPanel) ──
+var workerUrl = '';
+var picked    = null; // { content }
+
+function cfg(k) { try { return localStorage.getItem(k) || ''; } catch(e) { return ''; } }
+
+window.addEventListener('load', function() {
+  workerUrl = cfg('_ap_workerUrl');
+
+  // Changelog
+  var clEl = document.getElementById('cl');
+  var savedCl = cfg('_ap_changelog');
+  if (clEl && savedCl) clEl.value = savedCl;
+
+  // Версия
+  fetchVersion();
+
+  // Preload path (лонгтап из Files)
+  var pre = cfg('_ap_preloadPath');
+  if (pre) { try { localStorage.removeItem('_ap_preloadPath'); } catch(e){} loadFile(pre); }
+});
+
+// ── postMessage от родителя (touch drag) ─────────────────────────
+window.addEventListener('message', function(e) {
+  if (!e.data) return;
+  if (e.data.type === 'loadFile' && e.data.path) loadFile(e.data.path);
+  if (e.data.type === 'dragOver') {
+    var d = document.getElementById('dropZone');
+    if (e.data.active) d.classList.add('over'); else d.classList.remove('over');
+  }
+});
+
+function dz() { return document.getElementById('dropZone'); }
+
+function onDrop(event) {
+  event.preventDefault();
+  dz().classList.remove('over');
+  // adminDragFilePath установлен в родителе при dragstart из Files
+  var path = null;
+  try { path = window.parent.adminDragFilePath; window.parent.adminDragFilePath = null; } catch(x){}
+  if (path) { loadFile(path); return; }
+  setFst('✗ Нет пути. Перетащи .html из Files.', '#f55');
+}
+
+// ── Читаем файл ───────────────────────────────────────────────────
+function loadFile(path) {
+  setFst('Читаю файл...', '#888');
+  if (!And || !And.readFileBase64) { setFst('✗ Android bridge недоступен', '#f55'); return; }
+  try {
+    var b64 = And.readFileBase64(path);
+    if (!b64 || b64.startsWith('__ERR__:')) {
+      setFst('✗ ' + (b64 ? b64.slice(8) : 'Ошибка чтения'), '#f55'); return;
+    }
+    var content = decodeURIComponent(escape(atob(b64)));
+    picked = { content: content };
+    var cs = checksum(content), kb = Math.round(content.length / 1024);
+    var name = path.split('/').pop().split(':').pop();
+    var d = dz(); d.classList.remove('over'); d.classList.add('ready');
+    d.innerHTML = '<div style="font-size:20px">✅</div>' +
+      '<div style="font-weight:bold;color:#0f8">' + esc(name) + '</div>' +
+      '<div style="font-size:10px">' + kb + ' КБ</div>' +
+      '<div style="font-size:9px;color:#0a8">cs: ' + cs + '</div>';
+    setFst('', '');
+    hideBr();
+  } catch(e) { setFst('✗ ' + e.message, '#f55'); }
+}
+
+// ── Авто-поиск ────────────────────────────────────────────────────
+function autoFind() {
+  setFst('Поиск...', '#888');
+  if (!And || !And.listDirectory) { setFst('✗ listDirectory недоступен', '#f55'); return; }
+  var dirs = ['/sdcard/AppProjects','/sdcard/AIDE/projects','/storage/emulated/0/AppProjects','/sdcard/Download','/sdcard/'];
+  var found = [];
+  dirs.forEach(function(dir) {
+    try {
+      var raw = And.listDirectory(dir);
+      if (!raw || raw.startsWith('__ERR__')) return;
+      parseDir(raw).forEach(function(it) {
+        var n = it.name, d = it.isDir;
+        if (!d && n.toLowerCase().endsWith('.html')) found.push(dir + '/' + n);
+        if (d) {
+          try {
+            var sub = And.listDirectory(dir + '/' + n + '/app/src/main/assets');
+            if (!sub || sub.startsWith('__ERR__')) return;
+            parseDir(sub).forEach(function(s) {
+              if ((s.name||'').toLowerCase() === 'index.html')
+                found.push(dir+'/'+n+'/app/src/main/assets/index.html');
+            });
+          } catch(x){}
+        }
+      });
+    } catch(x){}
+  });
+  if (!found.length) { setFst('✗ Не найдено. Попробуй "Обзор".', '#f55'); return; }
+  var br = document.getElementById('browser');
+  br.style.display = 'block';
+  br.innerHTML = '<div class="br-hd">Найдено ' + found.length + ' — тапни:</div>' +
+    found.map(function(p) {
+      return '<div class="br-it" style="color:#0f8" onclick="loadFile(\'' + jsq(p) + '\')">📄 ' +
+        esc(p.split('/').pop()) + '<div style="font-size:9px;color:#555">' + esc(p) + '</div></div>';
+    }).join('');
+  setFst('Найдено: ' + found.length + '. Тапни файл.', '#888');
+}
+
+// ── Браузер файлов ────────────────────────────────────────────────
+var _bp = '/sdcard';
+function toggleBr() {
+  var br = document.getElementById('browser');
+  if (br.style.display !== 'none') { hideBr(); return; }
+  browseTo('/sdcard');
+}
+function hideBr() { document.getElementById('browser').style.display = 'none'; }
+function browseTo(path) {
+  _bp = path;
+  var br = document.getElementById('browser');
+  if (!And || !And.listDirectory) {
+    br.innerHTML = '<div class="br-it" style="color:#f55">listDirectory недоступен</div>';
+    br.style.display = 'block'; return;
+  }
+  br.style.display = 'block';
+  br.innerHTML = '<div class="br-it" style="color:#888">Загрузка...</div>';
+  try {
+    var items = parseDir(And.listDirectory(path));
+    var up = path.split('/').slice(0,-1).join('/') || '/sdcard';
+    var h = '<div class="br-hd"><span onclick="browseTo(\'' + jsq(up) + '\')" style="cursor:pointer">← Назад</span>' +
+      '<span style="color:#444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(path) + '</span></div>';
+    var any = false;
+    items.forEach(function(it) {
+      var n = it.name, d = it.isDir, ip = path + '/' + n;
+      if (!d && !n.toLowerCase().endsWith('.html')) return;
+      any = true;
+      var fn = d ? 'browseTo(\'' + jsq(ip) + '\')' : 'loadFile(\'' + jsq(ip) + '\')';
+      h += '<div class="br-it" style="color:' + (d?'#fda':'#0f8') + '" onclick="' + fn + '">' + (d?'📁':'📄') + ' ' + esc(n) + '</div>';
+    });
+    if (!any) h += '<div class="br-it" style="color:#555">Нет .html или папок</div>';
+    br.innerHTML = h;
+  } catch(e) { br.innerHTML = '<div class="br-it" style="color:#f55">' + esc(e.message) + '</div>'; }
+}
+
+// ── Публикация ────────────────────────────────────────────────────
+function pub() {
+  var key = (document.getElementById('key').value||'').trim();
+  var ver = (document.getElementById('ver').value||'').trim();
+  var cl  = (document.getElementById('cl').value||'').trim();
+  var pst = document.getElementById('pst');
+  if (!key || !ver || !picked) { pst.textContent='✗ Нужен ключ, версия и файл.'; pst.style.color='#f55'; return; }
+  pst.textContent='Публикую...'; pst.style.color='#888';
+  var cs = checksum(picked.content);
+  var payload = JSON.stringify({ adminKey:key, version:ver, date:new Date().toISOString().slice(0,10), changelog:cl, checksum:cs, html:picked.content });
+  var url = workerUrl + '/admin/publish';
+  function onR(r) {
+    try {
+      var d = r && r.body ? JSON.parse(r.body) : null;
+      if (d && d.ok) {
+        pst.textContent = '✓ Опубликовано! v' + ver + ' — пользователи увидят уведомление.'; pst.style.color='#0f8';
+        picked = null;
+        var dEl = dz(); dEl.classList.remove('ready');
+        dEl.innerHTML = '<div style="font-size:24px">✅</div><div style="color:#0f8">Опубликовано v' + ver + '!</div>';
+      } else {
+        pst.textContent = '✗ ' + (d&&d.error ? d.error : 'Ошибка публикации.'); pst.style.color='#f55';
+      }
+    } catch(x) { pst.textContent='✗ Ошибка сети.'; pst.style.color='#f55'; }
+  }
+  if (And && And.httpPost) {
+    var cb = 'apPub_' + Date.now();
+    window[cb] = function(r) { delete window[cb]; onR(r); };
+    And.httpPost(url, payload, cb);
+  } else {
+    fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:payload})
+      .then(function(r){return r.json();}).then(function(d){onR({body:JSON.stringify(d)});}).catch(function(){onR(null);});
+  }
+}
+
+// ── Версия с сервера ──────────────────────────────────────────────
+function fetchVersion() {
+  function fill(sv) {
+    var el = document.getElementById('ver'); if (!el||el.value) return;
+    var base = sv || cfg('_ap_version') || '1.0.0';
+    var p = String(base).split('.').map(Number); while(p.length<3) p.push(0);
+    p[2]=(p[2]||0)+1; el.value=p.join('.');
+  }
+  if (And && And.httpGet && workerUrl) {
+    var cb='apVer_'+Date.now();
+    window[cb]=function(r){delete window[cb];try{fill(JSON.parse(r.body).version);}catch(x){fill(null);}};
+    And.httpGet(workerUrl+'/update/version',cb);
+  } else fill(null);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+function parseDir(raw) {
+  if (!raw||raw.startsWith('__ERR__')) return [];
+  try { return JSON.parse(raw); } catch(x){}
+  return String(raw).split('\n').filter(Boolean).map(function(s){
+    return { name:s.replace(/\/$/,''), isDir:s.endsWith('/') };
+  });
+}
+function checksum(str) {
+  var h=5381; for(var i=0;i<str.length;i++) h=((h<<5)+h+str.charCodeAt(i))|0; return String(h>>>0);
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function jsq(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function setFst(m,c){ var e=document.getElementById('fst'); e.textContent=m; e.style.color=c||'#888'; }
+</script>
+</body>
+</html>
