@@ -2102,7 +2102,7 @@ public class MainActivity extends Activity {
         // без пользовательского жеста). Используется для звуков загрузочной
         // анимации, которые должны играть без тапа.
         // delayMs — задержка в миллисекундах от момента вызова.
-        @JavascriptInterface
+ @JavascriptInterface
         public void scheduleSound(final String filename, final int delayMs) {
             new Thread(new Runnable() {
                 public void run() {
@@ -2182,6 +2182,7 @@ public class MainActivity extends Activity {
             });
         }
 
+        @JavascriptInterface
         public void pickStoreFile() {
             activity.runOnUiThread(new Runnable() {
 				public void run() {
