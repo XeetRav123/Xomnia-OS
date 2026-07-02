@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private static final int VOICE_INPUT_REQUEST_CODE = 2003;
     private static final int SAF_PICK_STORE_FILE_CODE = 2004;
     private static final int SAF_PICK_PROFILE_PHOTO_CODE = 2005;
+    private static final int SAF_PICK_FONT_FILE_CODE = 2006;
     private static final String PREFS_NAME = "xomnia_prefs";
     // Прокси без авторизации, HTTP/HTTPS CONNECT — применяется ко всему
     // сетевому трафику приложения: и к нативным запросам (httpGet/httpPost,
@@ -297,6 +298,80 @@ public class MainActivity extends Activity {
                 }
             } else {
                 notifyJs(cancelEventName, "");
+            }
+        } else if (requestCode == SAF_PICK_FONT_FILE_CODE) {
+            // Выбор файла шрифта (.ttf/.otf/.woff/.woff2) для Fonts app.
+            // В отличие от STORE_FILE/PROFILE_PHOTO, JS-стороне нужно ещё и
+            // оригинальное имя файла (используется как имя шрифта в
+            // FontManager) — берём его через OpenableColumns.DISPLAY_NAME,
+            // это надёжнее, чем разбирать последний сегмент URI руками
+            // (некоторые SAF-провайдеры отдают непрозрачные document ID).
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                Uri fileUri = data.getData();
+                if (fileUri != null) {
+                    try {
+                        getContentResolver().takePersistableUriPermission(
+                            fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    } catch (Exception e) { /* некоторые провайдеры не поддерживают persist */ }
+
+                    String displayName = "font";
+                    Cursor cursor = null;
+                    try {
+                        cursor = getContentResolver().query(fileUri,
+                            new String[]{ android.provider.OpenableColumns.DISPLAY_NAME },
+                            null, null, null);
+                        if (cursor != null && cursor.moveToFirst()) {
+                            int idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                            if (idx >= 0) {
+                                String n = cursor.getString(idx);
+                                if (n != null && !n.isEmpty()) displayName = n;
+                            }
+                        }
+                    } catch (Exception e) { /* оставляем имя по умолчанию */ }
+                    finally { if (cursor != null) cursor.close(); }
+
+                    String mime = getContentResolver().getType(fileUri);
+                    if (mime == null) mime = "application/octet-stream";
+
+                    // Шрифты обычно небольшие — тот же лимит на чтение в память,
+                    // что у обоев/фото профиля, с запасом более чем достаточен.
+                    final long MAX_READ_BYTES = 5 * 1024 * 1024;
+                    try {
+                        java.io.InputStream is = getContentResolver().openInputStream(fileUri);
+                        if (is == null) {
+                            notifyJs("onFontFileSelected", "{\"error\":\"Cannot open file\"}");
+                        } else {
+                            java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+                            byte[] tmp = new byte[16384];
+                            int total = 0, n;
+                            boolean tooLarge = false;
+                            while ((n = is.read(tmp)) != -1) {
+                                total += n;
+                                if (total > MAX_READ_BYTES) { tooLarge = true; break; }
+                                buffer.write(tmp, 0, n);
+                            }
+                            is.close();
+                            if (tooLarge) {
+                                notifyJs("onFontFileSelected", "{\"error\":\"File too large (max 5MB)\"}");
+                            } else {
+                                String b64 = android.util.Base64.encodeToString(
+                                    buffer.toByteArray(), android.util.Base64.NO_WRAP);
+                                String dataUri = "data:" + mime + ";base64," + b64;
+                                // displayName экранируем на случай кавычек/бэкслэшей в
+                                // имени файла — единственное поле здесь не из нашего
+                                // контролируемого алфавита (в отличие от kind/mediaType).
+                                String safeName = displayName.replace("\\","\\\\").replace("\"","\\\"");
+                                notifyJs("onFontFileSelected", "{\"name\":\"" + safeName +
+                                    "\",\"dataUri\":\"" + dataUri + "\"}");
+                            }
+                        }
+                    } catch (Exception e) {
+                        notifyJs("onFontFileSelected", "{\"error\":\"" +
+                            e.getMessage().replace("\"", "'") + "\"}");
+                    }
+                }
+            } else {
+                notifyJs("onFontFileSelectCancelled", "");
             }
         } else if (requestCode == VOICE_INPUT_REQUEST_CODE) {
             // Системный диалог распознавания речи Android (RecognizerIntent) —
@@ -2216,6 +2291,37 @@ public class MainActivity extends Activity {
 						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
 									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
 						activity.startActivityForResult(intent, SAF_PICK_PROFILE_PHOTO_CODE);
+					} catch (Exception e) {
+						android.widget.Toast.makeText(activity,
+													"Cannot open file picker: " + e.getMessage(),
+													android.widget.Toast.LENGTH_LONG).show();
+					}
+				}
+			});
+        }
+
+        // Выбор файла шрифта (.ttf/.otf/.woff/.woff2) для Fonts app. MIME-типы
+        // шрифтов не унифицированы между SAF-провайдерами (одни отдают font/ttf,
+        // другие application/x-font-ttf или просто application/octet-stream),
+        // поэтому перечисляем известные варианты через EXTRA_MIME_TYPES с
+        // общим типом "*/*" — так делает и pickStoreFile выше для image/video.
+        @JavascriptInterface
+        public void pickFontFile() {
+            activity.runOnUiThread(new Runnable() {
+				public void run() {
+					try {
+						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+						intent.setType("*/*");
+						intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+							"font/ttf", "font/otf", "font/woff", "font/woff2",
+							"application/x-font-ttf", "application/x-font-otf",
+							"application/font-woff", "application/font-sfnt",
+							"application/octet-stream"
+						});
+						intent.addCategory(Intent.CATEGORY_OPENABLE);
+						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+						activity.startActivityForResult(intent, SAF_PICK_FONT_FILE_CODE);
 					} catch (Exception e) {
 						android.widget.Toast.makeText(activity,
 													"Cannot open file picker: " + e.getMessage(),
