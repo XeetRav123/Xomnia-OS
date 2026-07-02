@@ -1,1 +1,63 @@
+name: Build APK with icon (no base64, generated with ImageMagick)
 
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Find AndroidManifest.xml
+        id: findman
+        run: |
+          MAN=$(find . -name "AndroidManifest.xml" | head -n1)
+          if [ -z "$MAN" ]; then echo "Manifest not found!"; exit 1; fi
+          echo "path=$MAN" >> "$GITHUB_OUTPUT"
+          echo "Found: $MAN"
+
+      - name: Draw icon with ImageMagick (no external file needed)
+        run: |
+          MAN="${{ steps.findman.outputs.path }}"
+          RES_DIR=$(dirname "$MAN")/res
+          mkdir -p "$RES_DIR/drawable"
+          convert -size 192x192 xc:'#1a0e2e' -fill white -gravity center -pointsize 130 -font DejaVu-Sans-Bold -annotate 0 'X' "$RES_DIR/drawable/ic_launcher.png"
+          echo "Icon created: $RES_DIR/drawable/ic_launcher.png"
+          ls -la "$RES_DIR/drawable/"
+
+      - name: Add android:icon to manifest if missing
+        run: |
+          MAN="${{ steps.findman.outputs.path }}"
+          if ! grep -q 'android:icon' "$MAN"; then
+            python3 -c "
+import re
+p = '$MAN'
+s = open(p, encoding='utf-8').read()
+s = s.replace('<application', '<application\n        android:icon=\"@drawable/ic_launcher\"', 1)
+open(p, 'w', encoding='utf-8').write(s)
+"
+            echo "Added android:icon to $MAN"
+          else
+            echo "android:icon already present — skipping"
+          fi
+          cat "$MAN"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew || (gradle wrapper && chmod +x gradlew)
+
+      - name: Build APK
+        run: ./gradlew assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: xomnia-apk-with-icon
+          path: app/build/outputs/apk/release/*.apk
