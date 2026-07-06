@@ -74,7 +74,8 @@ public class MainActivity extends Activity {
     private static final int VOICE_INPUT_REQUEST_CODE = 2003;
     private static final int SAF_PICK_STORE_FILE_CODE = 2004;
     private static final int SAF_PICK_PROFILE_PHOTO_CODE = 2005;
-    private static final int SAF_PICK_FONT_FILE_CODE = 2006;
+    private static final int SAF_PICK_NEWS_IMAGE_CODE = 2006;
+    private static final int SAF_PICK_FORUM_FILE_CODE = 2007;
     private static final String PREFS_NAME = "xomnia_prefs";
     // Прокси без авторизации, HTTP/HTTPS CONNECT — применяется ко всему
     // сетевому трафику приложения: и к нативным запросам (httpGet/httpPost,
@@ -118,12 +119,6 @@ public class MainActivity extends Activity {
         );
 
         web.setWebViewClient(new WebViewClient());
-        web.setWebChromeClient(new android.webkit.WebChromeClient() {
-            @Override
-            public void onPermissionRequest(android.webkit.PermissionRequest request) {
-                request.grant(request.getResources());
-            }
-        });
         web.setScrollBarStyle(WebView.SCROLLBARS_INSIDE_OVERLAY);
         web.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
 
@@ -235,16 +230,19 @@ public class MainActivity extends Activity {
             } else {
                 notifyJs("onWallpaperFileSelectCancelled", "");
             }
-        } else if (requestCode == SAF_PICK_STORE_FILE_CODE || requestCode == SAF_PICK_PROFILE_PHOTO_CODE) {
-            // Общая логика для двух разных пикеров (публикация обоев в Store
-            // и фото профиля) — отличается только то, какое JS-событие
-            // получает результат. Читаем байты СРАЗУ здесь (на устройстве),
-            // чтобы JS получил готовый data: URI без второго round-trip
-            // через readUriBase64 — проще и быстрее для разовой загрузки файла.
-            String eventName = (requestCode == SAF_PICK_STORE_FILE_CODE)
-                ? "onStoreFileSelected" : "onProfilePhotoSelected";
-            String cancelEventName = (requestCode == SAF_PICK_STORE_FILE_CODE)
-                ? "onStoreFileSelectCancelled" : "onProfilePhotoSelectCancelled";
+        } else if (requestCode == SAF_PICK_STORE_FILE_CODE || requestCode == SAF_PICK_PROFILE_PHOTO_CODE || requestCode == SAF_PICK_NEWS_IMAGE_CODE) {
+            // Общая логика для трёх разных пикеров (публикация обоев в Store,
+            // фото профиля, картинка для новости в Admin Panel) — отличается
+            // только то, какое JS-событие получает результат. Читаем байты
+            // СРАЗУ здесь (на устройстве), чтобы JS получил готовый data: URI
+            // без второго round-trip через readUriBase64 — проще и быстрее
+            // для разовой загрузки файла.
+            String eventName = (requestCode == SAF_PICK_STORE_FILE_CODE) ? "onStoreFileSelected"
+                : (requestCode == SAF_PICK_PROFILE_PHOTO_CODE) ? "onProfilePhotoSelected"
+                : "onNewsImageSelected";
+            String cancelEventName = (requestCode == SAF_PICK_STORE_FILE_CODE) ? "onStoreFileSelectCancelled"
+                : (requestCode == SAF_PICK_PROFILE_PHOTO_CODE) ? "onProfilePhotoSelectCancelled"
+                : "onNewsImageSelectCancelled";
             if (resultCode == Activity.RESULT_OK && data != null) {
                 Uri fileUri = data.getData();
                 if (fileUri != null) {
@@ -255,14 +253,13 @@ public class MainActivity extends Activity {
                     String mime = getContentResolver().getType(fileUri);
                     if (mime == null) mime = "application/octet-stream";
                     String kind = mime.startsWith("video/") ? "video" : "image";
-                    // Жёсткий лимит на размер исходного файла, читаемого в память —
-                    // 5MB сырых байт (после base64 будет крупнее, но это уже
-                    // дополнительно проверяется на сервере). Для фото профиля
-                    // этого с запасом достаточно; для видео-обоев — намеренно
-                    // совпадает примерно с лимитом сервера (см. STORE_MAX_VIDEO_LENGTH
-                    // в gody-worker.js), чтобы не читать в память то, что
-                    // всё равно потом отклонит сервер.
-                    final long MAX_READ_BYTES = 5 * 1024 * 1024;
+                    // Жёсткий лимит на размер исходного файла, читаемого в память.
+                    // Поднят до ~25MB (с запасом) под новый лимит видео-обоев на
+                    // сервере (~20MB, см. STORE_MAX_VIDEO_LENGTH в gody-worker.js —
+                    // видео теперь хранится в Workers KV, а не в D1, лимит стал
+                    // мягче). Для фото профиля это тоже безвредно завышенный
+                    // потолок — просто разрешает больше, чем реально нужно.
+                    final long MAX_READ_BYTES = 25 * 1024 * 1024;
                     try {
                         java.io.InputStream is = getContentResolver().openInputStream(fileUri);
                         if (is == null) {
@@ -279,7 +276,7 @@ public class MainActivity extends Activity {
                             }
                             is.close();
                             if (tooLarge) {
-                                notifyJs(eventName, "{\"error\":\"File too large (max 5MB)\"}");
+                                notifyJs(eventName, "{\"error\":\"File too large (max 25MB)\"}");
                             } else {
                                 String b64 = android.util.Base64.encodeToString(
                                     buffer.toByteArray(), android.util.Base64.NO_WRAP);
@@ -299,13 +296,11 @@ public class MainActivity extends Activity {
             } else {
                 notifyJs(cancelEventName, "");
             }
-        } else if (requestCode == SAF_PICK_FONT_FILE_CODE) {
-            // Выбор файла шрифта (.ttf/.otf/.woff/.woff2) для Fonts app.
-            // В отличие от STORE_FILE/PROFILE_PHOTO, JS-стороне нужно ещё и
-            // оригинальное имя файла (используется как имя шрифта в
-            // FontManager) — берём его через OpenableColumns.DISPLAY_NAME,
-            // это надёжнее, чем разбирать последний сегмент URI руками
-            // (некоторые SAF-провайдеры отдают непрозрачные document ID).
+        } else if (requestCode == SAF_PICK_FORUM_FILE_CODE) {
+            // Отдельная ветка (не совмещена с блоком выше) — тут дополнительно
+            // нужно оригинальное ИМЯ файла (для отображения в чате как
+            // "документ.pdf", а не просто иконка по MIME), которое остальным
+            // пикерам не требовалось.
             if (resultCode == Activity.RESULT_OK && data != null) {
                 Uri fileUri = data.getData();
                 if (fileUri != null) {
@@ -313,33 +308,25 @@ public class MainActivity extends Activity {
                         getContentResolver().takePersistableUriPermission(
                             fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     } catch (Exception e) { /* некоторые провайдеры не поддерживают persist */ }
-
-                    String displayName = "font";
-                    Cursor cursor = null;
-                    try {
-                        cursor = getContentResolver().query(fileUri,
-                            new String[]{ android.provider.OpenableColumns.DISPLAY_NAME },
-                            null, null, null);
-                        if (cursor != null && cursor.moveToFirst()) {
-                            int idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
-                            if (idx >= 0) {
-                                String n = cursor.getString(idx);
-                                if (n != null && !n.isEmpty()) displayName = n;
-                            }
-                        }
-                    } catch (Exception e) { /* оставляем имя по умолчанию */ }
-                    finally { if (cursor != null) cursor.close(); }
-
                     String mime = getContentResolver().getType(fileUri);
                     if (mime == null) mime = "application/octet-stream";
-
-                    // Шрифты обычно небольшие — тот же лимит на чтение в память,
-                    // что у обоев/фото профиля, с запасом более чем достаточен.
-                    final long MAX_READ_BYTES = 5 * 1024 * 1024;
+                    String displayName = "file";
+                    try {
+                        android.database.Cursor cursor = getContentResolver().query(
+                            fileUri, new String[]{ android.provider.OpenableColumns.DISPLAY_NAME }, null, null, null);
+                        if (cursor != null) {
+                            if (cursor.moveToFirst()) {
+                                int idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                                if (idx >= 0) displayName = cursor.getString(idx);
+                            }
+                            cursor.close();
+                        }
+                    } catch (Exception e) { /* не критично, останется "file" */ }
+                    final long MAX_READ_BYTES = 25 * 1024 * 1024;
                     try {
                         java.io.InputStream is = getContentResolver().openInputStream(fileUri);
                         if (is == null) {
-                            notifyJs("onFontFileSelected", "{\"error\":\"Cannot open file\"}");
+                            notifyJs("onForumFileSelected", "{\"error\":\"Cannot open file\"}");
                         } else {
                             java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
                             byte[] tmp = new byte[16384];
@@ -352,26 +339,22 @@ public class MainActivity extends Activity {
                             }
                             is.close();
                             if (tooLarge) {
-                                notifyJs("onFontFileSelected", "{\"error\":\"File too large (max 5MB)\"}");
+                                notifyJs("onForumFileSelected", "{\"error\":\"File too large (max 25MB)\"}");
                             } else {
                                 String b64 = android.util.Base64.encodeToString(
                                     buffer.toByteArray(), android.util.Base64.NO_WRAP);
                                 String dataUri = "data:" + mime + ";base64," + b64;
-                                // displayName экранируем на случай кавычек/бэкслэшей в
-                                // имени файла — единственное поле здесь не из нашего
-                                // контролируемого алфавита (в отличие от kind/mediaType).
-                                String safeName = displayName.replace("\\","\\\\").replace("\"","\\\"");
-                                notifyJs("onFontFileSelected", "{\"name\":\"" + safeName +
-                                    "\",\"dataUri\":\"" + dataUri + "\"}");
+                                notifyJs("onForumFileSelected", "{\"dataUri\":\"" + dataUri +
+                                    "\",\"fileName\":\"" + displayName.replace("\\","\\\\").replace("\"","\\\"") + "\"}");
                             }
                         }
                     } catch (Exception e) {
-                        notifyJs("onFontFileSelected", "{\"error\":\"" +
+                        notifyJs("onForumFileSelected", "{\"error\":\"" +
                             e.getMessage().replace("\"", "'") + "\"}");
                     }
                 }
             } else {
-                notifyJs("onFontFileSelectCancelled", "");
+                notifyJs("onForumFileSelectCancelled", "");
             }
         } else if (requestCode == VOICE_INPUT_REQUEST_CODE) {
             // Системный диалог распознавания речи Android (RecognizerIntent) —
@@ -821,8 +804,13 @@ public class MainActivity extends Activity {
                 java.net.Proxy proxy = activity.getConfiguredProxy();
                 conn = (HttpURLConnection) url.openConnection(proxy);
                 conn.setRequestMethod(method);
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(8000);
+                // 8 секунд хватало для обычных запросов (чат, публикация текста),
+                // но видео-обои весом до ~20МБ на мобильном интернете спокойно
+                // не укладываются в это время — отсюда SocketTimeoutException.
+                // Коннект остаётся быстрым (если сервер недоступен — узнаём об
+                // этом быстро), а вот на сам обмен данными даём кратно больше.
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(120000);
                 conn.setRequestProperty("User-Agent", "Mozilla/5.0 (XomniaOS)");
 
                 if ("POST".equals(method) && body != null) {
@@ -1754,7 +1742,50 @@ public class MainActivity extends Activity {
             }
         }
 
-        // Удаляет файл или папку (рекурсивно для папок — через DocumentsContract)
+        // То же самое, что writeFile, но пишет БИНАРНЫЕ данные (base64) —
+        // нужно для сохранения скачанных из чата X Forum файлов (картинки,
+        // видео, документы), которые writeFile как UTF-8 текст испортил бы.
+        @JavascriptInterface
+        public String writeFileBase64(String path, String base64Content) {
+            String[] tp = parseTreePath(path);
+            if (tp == null) return "ERROR:No folder selected";
+            String treeUriStr = tp[0], relPath = tp[1];
+
+            try {
+                Uri treeUri = Uri.parse(treeUriStr);
+                String[] resolved = resolvePath(treeUri, relPath);
+                Uri fileUri;
+
+                if (resolved == null) {
+                    String[] pn = splitParent(relPath);
+                    String[] parentResolved = resolvePath(treeUri, pn[0]);
+                    if (parentResolved == null) return "ERROR:Parent folder not found";
+
+                    Uri parentUri = Uri.parse(parentResolved[0]);
+                    String parentDocId = DocumentsContract.getDocumentId(parentUri);
+                    String mime = guessMimeForName(pn[1]);
+                    fileUri = DocumentsContract.createDocument(
+                        activity.getContentResolver(), parentUri, mime, pn[1]
+                    );
+                    if (fileUri == null) return "ERROR:Cannot create file";
+                } else {
+                    if (DIR_MIME.equals(resolved[1])) return "ERROR:Is a directory";
+                    fileUri = Uri.parse(resolved[0]);
+                }
+
+                byte[] bytes = android.util.Base64.decode(base64Content, android.util.Base64.DEFAULT);
+                java.io.OutputStream os = activity.getContentResolver().openOutputStream(fileUri, "wt");
+                if (os == null) return "ERROR:Cannot open for writing";
+                os.write(bytes);
+                os.flush();
+                os.close();
+                return "OK";
+            } catch (Exception e) {
+                return "ERROR:" + e.getMessage();
+            }
+        }
+
+
         @JavascriptInterface
         public String deleteFile(String path) {
             String[] tp = parseTreePath(path);
@@ -2133,6 +2164,7 @@ public class MainActivity extends Activity {
         // Тот же принцип, что pickWallpaperFile() выше, но для загрузки файла
         // в Store (картинка ИЛИ видео-обои для публикации) — отдельный код
         // запроса, чтобы результат шёл в другое JS-событие.
+        @JavascriptInterface
         // ── Сохраняет скачанный HTML-файл обновления во внутреннее хранилище ──
         // При следующем старте MainActivity проверит этот файл и загрузит
         // его вместо assets/index.html (см. логику в onCreate выше).
@@ -2177,7 +2209,7 @@ public class MainActivity extends Activity {
         // без пользовательского жеста). Используется для звуков загрузочной
         // анимации, которые должны играть без тапа.
         // delayMs — задержка в миллисекундах от момента вызова.
- @JavascriptInterface
+        @JavascriptInterface
         public void scheduleSound(final String filename, final int delayMs) {
             new Thread(new Runnable() {
                 public void run() {
@@ -2257,7 +2289,6 @@ public class MainActivity extends Activity {
             });
         }
 
-        @JavascriptInterface
         public void pickStoreFile() {
             activity.runOnUiThread(new Runnable() {
 				public void run() {
@@ -2300,28 +2331,21 @@ public class MainActivity extends Activity {
 			});
         }
 
-        // Выбор файла шрифта (.ttf/.otf/.woff/.woff2) для Fonts app. MIME-типы
-        // шрифтов не унифицированы между SAF-провайдерами (одни отдают font/ttf,
-        // другие application/x-font-ttf или просто application/octet-stream),
-        // поэтому перечисляем известные варианты через EXTRA_MIME_TYPES с
-        // общим типом "*/*" — так делает и pickStoreFile выше для image/video.
+        // Выбор картинки для новости в Admin Panel — та же логика, что у
+        // pickProfilePhoto (только image/*, свой код запроса/событие).
+        // Раньше кнопка "Выберите файл" там вообще ничего не делала —
+        // <input type="file"> без нативного SAF-пикера тут не работает.
         @JavascriptInterface
-        public void pickFontFile() {
+        public void pickNewsImage() {
             activity.runOnUiThread(new Runnable() {
 				public void run() {
 					try {
 						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-						intent.setType("*/*");
-						intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
-							"font/ttf", "font/otf", "font/woff", "font/woff2",
-							"application/x-font-ttf", "application/x-font-otf",
-							"application/font-woff", "application/font-sfnt",
-							"application/octet-stream"
-						});
+						intent.setType("image/*");
 						intent.addCategory(Intent.CATEGORY_OPENABLE);
 						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
 									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-						activity.startActivityForResult(intent, SAF_PICK_FONT_FILE_CODE);
+						activity.startActivityForResult(intent, SAF_PICK_NEWS_IMAGE_CODE);
 					} catch (Exception e) {
 						android.widget.Toast.makeText(activity,
 													"Cannot open file picker: " + e.getMessage(),
@@ -2331,8 +2355,29 @@ public class MainActivity extends Activity {
 			});
         }
 
-        // Открывает системный диалог выбора ОДНОГО файла (картинка или видео)
-        // для использования как обои рабочего стола.
+        // Выбор файла ЛЮБОГО типа для отправки в чат X Forum — своя копия
+        // логики (не переиспользую pickAnyFile, у него общий requestCode с
+        // публикацией обновлений — здесь нужен отдельный, чтобы события не
+        // путались между собой).
+        @JavascriptInterface
+        public void pickForumFile() {
+            activity.runOnUiThread(new Runnable() {
+				public void run() {
+					try {
+						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+						intent.setType("*/*");
+						intent.addCategory(Intent.CATEGORY_OPENABLE);
+						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+						activity.startActivityForResult(intent, SAF_PICK_FORUM_FILE_CODE);
+					} catch (Exception e) {
+						android.widget.Toast.makeText(activity,
+											"Cannot open file picker: " + e.getMessage(),
+											android.widget.Toast.LENGTH_LONG).show();
+					}
+				}
+			});
+        }
         @JavascriptInterface
         public void pickWallpaperFile() {
             activity.runOnUiThread(new Runnable() {
