@@ -23,6 +23,11 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+// ── Добавлено для звонков X Forum (доступ к микрофону/камере) ───────────
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.webkit.PermissionRequest;
+import android.os.Build;
 
 public class MainActivity extends Activity {
 
@@ -122,12 +127,47 @@ public class MainActivity extends Activity {
         web.setScrollBarStyle(WebView.SCROLLBARS_INSIDE_OVERLAY);
         web.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
 
+        // ── Разрешение на микрофон/камеру для WebView (нужно для getUserMedia
+        // в звонках X Forum) — без этого браузерный getUserMedia() в JS
+        // либо вечно висит, либо сразу падает с ошибкой. Системное разрешение
+        // (RECORD_AUDIO/CAMERA) запрашивается отдельно в ensureMediaPermissions()
+        // ниже — сюда WebView лишь сообщает, что ему нужно, а мы просто
+        // подтверждаем то, что уже разрешено на уровне системы.
+        web.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        String[] requestedResources = request.getResources();
+                        java.util.List<String> toGrant = new java.util.ArrayList<String>();
+                        for (String r : requestedResources) {
+                            if (r.equals(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+                                    && MainActivity.this.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                toGrant.add(PermissionRequest.RESOURCE_AUDIO_CAPTURE);
+                            }
+                            if (r.equals(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+                                    && MainActivity.this.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                toGrant.add(PermissionRequest.RESOURCE_VIDEO_CAPTURE);
+                            }
+                        }
+                        if (!toGrant.isEmpty()) {
+                            request.grant(toGrant.toArray(new String[0]));
+                        } else {
+                            request.deny();
+                        }
+                    }
+                });
+            }
+        });
+
         rootContainer.addView(web, new FrameLayout.LayoutParams(
 								  FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
 							  ));
 
         setContentView(rootContainer);
         hideUI();
+        ensureMediaPermissions(); // спросить доступ к микрофону/камере у пользователя один раз при старте
 
         web.addJavascriptInterface(new JsBridge(this), "Android");
 
@@ -462,6 +502,27 @@ public class MainActivity extends Activity {
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         hideUI();
+    }
+
+    // ── Запрос системных разрешений на микрофон/камеру у пользователя ──────
+    // Нужно для звонков X Forum. Проверка на Build.VERSION.SDK_INT — так
+    // requestPermissions() безопасно вызывать даже если бы APK когда-нибудь
+    // запустили на совсем древнем Android (там runtime-разрешений вообще
+    // нет, всё выдаётся один раз при установке) — хотя на реальном телефоне
+    // (Android 12+) это всегда true.
+    private static final int MEDIA_PERMISSION_REQUEST_CODE = 4242;
+    private void ensureMediaPermissions() {
+        if (Build.VERSION.SDK_INT < 23) return;
+        java.util.List<String> needed = new java.util.ArrayList<String>();
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.CAMERA);
+        }
+        if (!needed.isEmpty()) {
+            requestPermissions(needed.toArray(new String[0]), MEDIA_PERMISSION_REQUEST_CODE);
+        }
     }
 
     private void hideUI() {
