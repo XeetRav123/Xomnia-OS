@@ -2072,4 +2072,702 @@ public class MainActivity extends Activity {
                     if (newDirUri == null) return "ERROR:Cannot create destination folder";
                     String newDirRel = destDirRel.isEmpty() ? finalName : destDirRel + "/" + finalName;
                     String err = copyDirRecursive(srcTreeUri, srcRel, destTreeUri, newDirRel);
-                    if (err != null) return e
+                    if (err != null) return err;
+                } else {
+                    String mime = srcResolved[1];
+                    Uri newFileUri = DocumentsContract.createDocument(
+                        activity.getContentResolver(), destParentUri,
+                        mime != null && !mime.isEmpty() ? mime : "application/octet-stream",
+                        finalName
+                    );
+                    if (newFileUri == null) return "ERROR:Cannot create destination file";
+                    String err = copyFileContents(Uri.parse(srcResolved[0]), newFileUri);
+                    if (err != null) return err;
+                }
+
+                if (deleteSource) {
+                    Uri srcUri = Uri.parse(srcResolved[0]);
+                    DocumentsContract.deleteDocument(activity.getContentResolver(), srcUri);
+                    // Не считаем ошибкой если удаление исходника не удалось —
+                    // копия уже на месте, это лучше чем потерять данные.
+                }
+
+                return "OK";
+            } catch (Exception e) {
+                return "ERROR:" + e.getMessage();
+            }
+        }
+
+        // Копирует один файл байт-в-байт через потоки (до 512MB — разумный
+        // предел, чтобы не зависнуть навечно на огромных видео через WebView).
+        private String copyFileContents(Uri srcUri, Uri destUri) {
+            java.io.InputStream is = null;
+            java.io.OutputStream os = null;
+            try {
+                is = activity.getContentResolver().openInputStream(srcUri);
+                os = activity.getContentResolver().openOutputStream(destUri, "wt");
+                if (is == null || os == null) return "ERROR:Cannot open streams";
+                byte[] buf = new byte[65536];
+                long total = 0;
+                long maxBytes = 512L * 1024 * 1024;
+                int n;
+                while ((n = is.read(buf)) != -1) {
+                    total += n;
+                    if (total > maxBytes) return "ERROR:File too large to copy (max 512MB)";
+                    os.write(buf, 0, n);
+                }
+                os.flush();
+                return null; // success
+            } catch (Exception e) {
+                return "ERROR:" + e.getMessage();
+            } finally {
+                try { if (is != null) is.close(); } catch (Exception e) { /* ignore */ }
+                try { if (os != null) os.close(); } catch (Exception e) { /* ignore */ }
+            }
+        }
+
+        // Рекурсивно копирует содержимое папки srcRel (в дереве srcTreeUri)
+        // в уже существующую папку destRel (в дереве destTreeUri).
+        private String copyDirRecursive(Uri srcTreeUri, String srcRel, Uri destTreeUri, String destRel) {
+            try {
+                String[] srcResolved = resolvePath(srcTreeUri, srcRel);
+                if (srcResolved == null) return "ERROR:Source folder vanished mid-copy";
+                Uri srcDirUri = Uri.parse(srcResolved[0]);
+                String srcDocId = DocumentsContract.getDocumentId(srcDirUri);
+                Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(srcTreeUri, srcDocId);
+
+                String[] destResolved = resolvePath(destTreeUri, destRel);
+                if (destResolved == null) return "ERROR:Destination folder vanished mid-copy";
+                Uri destDirUri = Uri.parse(destResolved[0]);
+
+                Cursor c = activity.getContentResolver().query(
+                    childrenUri, new String[]{ COL_DOC_ID, COL_NAME, COL_MIME }, null, null, null
+                );
+                if (c != null) {
+                    try {
+                        while (c.moveToNext()) {
+                            String name = c.getString(c.getColumnIndex(COL_NAME));
+                            String mime = c.getString(c.getColumnIndex(COL_MIME));
+                            String childSrcRel = srcRel.isEmpty() ? name : srcRel + "/" + name;
+                            boolean childIsDir = DIR_MIME.equals(mime);
+
+                            if (childIsDir) {
+                                Uri newSubDir = DocumentsContract.createDocument(
+                                    activity.getContentResolver(), destDirUri, DIR_MIME, name
+                                );
+                                if (newSubDir == null) return "ERROR:Cannot create subfolder " + name;
+                                String childDestRel = destRel.isEmpty() ? name : destRel + "/" + name;
+                                String err = copyDirRecursive(srcTreeUri, childSrcRel, destTreeUri, childDestRel);
+                                if (err != null) return err;
+                            } else {
+                                String[] childResolved = resolvePath(srcTreeUri, childSrcRel);
+                                if (childResolved == null) continue;
+                                Uri newFileUri = DocumentsContract.createDocument(
+                                    activity.getContentResolver(), destDirUri,
+                                    mime != null && !mime.isEmpty() ? mime : "application/octet-stream",
+                                    name
+                                );
+                                if (newFileUri == null) return "ERROR:Cannot create file " + name;
+                                String err = copyFileContents(Uri.parse(childResolved[0]), newFileUri);
+                                if (err != null) return err;
+                            }
+                        }
+                    } finally {
+                        c.close();
+                    }
+                }
+                return null; // success
+            } catch (Exception e) {
+                return "ERROR:" + e.getMessage();
+            }
+        }
+
+        // Подбирает свободное имя в целевой папке: если "photo.jpg" уже занято,
+        // пробует "photo (2).jpg", "photo (3).jpg" и так далее.
+        private String findAvailableName(Uri treeUri, String destDirRel, String desiredName) {
+            String existingCheck = destDirRel.isEmpty() ? desiredName : destDirRel + "/" + desiredName;
+            if (resolvePath(treeUri, existingCheck) == null) return desiredName;
+
+            String base = desiredName;
+            String ext = "";
+            int dotIdx = desiredName.lastIndexOf('.');
+            // Не отделяем расширение у скрытых файлов вида ".gitignore"
+            if (dotIdx > 0) {
+                base = desiredName.substring(0, dotIdx);
+                ext = desiredName.substring(dotIdx);
+            }
+            for (int i = 2; i < 1000; i++) {
+                String candidate = base + " (" + i + ")" + ext;
+                String candidateRel = destDirRel.isEmpty() ? candidate : destDirRel + "/" + candidate;
+                if (resolvePath(treeUri, candidateRel) == null) return candidate;
+            }
+            return desiredName + "_" + System.currentTimeMillis(); // крайний случай
+        }
+
+        private String guessMimeForName(String name) {
+            String ext = name.contains(".")
+                ? name.substring(name.lastIndexOf('.') + 1).toLowerCase()
+                : "";
+            if (ext.equals("txt") || ext.equals("log") || ext.equals("md")) return "text/plain";
+            if (ext.equals("json")) return "application/json";
+            if (ext.equals("html") || ext.equals("htm")) return "text/html";
+            if (ext.equals("js")) return "text/javascript";
+            if (ext.equals("xml")) return "text/xml";
+            return "application/octet-stream";
+        }
+
+        // Возвращает размер файла
+        @JavascriptInterface
+        public long getFileSize(String path) {
+            String[] tp = parseTreePath(path);
+            if (tp == null) return -1;
+            String treeUriStr = tp[0], relPath = tp[1];
+
+            try {
+                Uri treeUri = Uri.parse(treeUriStr);
+                String[] resolved = resolvePath(treeUri, relPath);
+                if (resolved == null) return -1;
+                if (DIR_MIME.equals(resolved[1])) return 0;
+
+                Uri fileUri = Uri.parse(resolved[0]);
+                Cursor c = activity.getContentResolver().query(
+                    fileUri, new String[]{ COL_SIZE }, null, null, null
+                );
+                if (c != null) {
+                    try {
+                        if (c.moveToFirst()) return c.getLong(c.getColumnIndex(COL_SIZE));
+                    } finally { c.close(); }
+                }
+                return -1;
+            } catch (Exception e) { return -1; }
+        }
+
+        // Возвращает информацию о первом корне SAF (для проверки "выбрана ли хоть одна папка")
+        @JavascriptInterface
+        public String getStoragePaths() {
+            java.util.List<String> uris = getValidTreeUris();
+            if (uris.isEmpty()) {
+                return "{\"hasRoot\":false}";
+            }
+            try {
+                String treeUriStr = uris.get(0);
+                Uri treeUri = Uri.parse(treeUriStr);
+                String rootName = "Selected Folder";
+
+                // Пробуем получить имя корневой папки
+                String[] resolved = resolvePath(treeUri, "");
+                if (resolved != null) {
+                    Uri rootUri = Uri.parse(resolved[0]);
+                    Cursor c = activity.getContentResolver().query(
+                        rootUri, new String[]{ COL_NAME }, null, null, null
+                    );
+                    if (c != null) {
+                        try {
+                            if (c.moveToFirst()) {
+                                String n = c.getString(c.getColumnIndex(COL_NAME));
+                                if (n != null && !n.isEmpty()) rootName = n;
+                            }
+                        } finally { c.close(); }
+                    }
+                }
+
+                return "{"
+                    + "\"hasRoot\":true,"
+                    + "\"rootCount\":" + uris.size() + ","
+                    + "\"rootName\":\"" + jsonEscape(rootName) + "\","
+                    + "\"treeUri\":\"" + jsonEscape(treeUriStr) + "\""
+                    + "}";
+            } catch (Exception e) {
+                return "{\"hasRoot\":false}";
+            }
+        }
+
+        // Открывает системный диалог выбора папки (SAF) — вызывается из JS
+        // Можно вызывать многократно — каждая выбранная папка добавляется в список
+        @JavascriptInterface
+        public void pickFolder() {
+            activity.runOnUiThread(new Runnable() {
+					public void run() {
+						try {
+							Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+							intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+											| Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+											| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+							activity.startActivityForResult(intent, SAF_PICK_TREE_CODE);
+						} catch (Exception e) {
+							android.widget.Toast.makeText(activity,
+														  "Cannot open folder picker: " + e.getMessage(),
+														  android.widget.Toast.LENGTH_LONG).show();
+						}
+					}
+				});
+        }
+        // ── Сохраняет скачанный HTML-файл обновления во внутреннее хранилище ──
+        // При следующем старте MainActivity проверит этот файл и загрузит
+        // его вместо assets/index.html (см. логику в onCreate выше).
+        // Возвращает "ok" или "error:..." в JS-колбэк.
+        @JavascriptInterface
+        public void saveUpdateFile(final String content, final String callbackName) {
+            new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        java.io.File f = new java.io.File(activity.getFilesDir(), "xomnia_update.html");
+                        java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+                        fos.write(content.getBytes("UTF-8"));
+                        fos.close();
+                        activity.runOnUiThread(new Runnable() {
+                            public void run() {
+                                activity.notifyJs(callbackName, "ok");
+                            }
+                        });
+                    } catch (final Exception e) {
+                        activity.runOnUiThread(new Runnable() {
+                            public void run() {
+                                activity.notifyJs(callbackName, "error:" + e.getMessage());
+                            }
+                        });
+                    }
+                }
+            }).start();
+        }
+
+        @JavascriptInterface
+        public boolean hasUpdateFile() {
+            return new java.io.File(activity.getFilesDir(), "xomnia_update.html").exists();
+        }
+
+        @JavascriptInterface
+        public void deleteUpdateFile() {
+            new java.io.File(activity.getFilesDir(), "xomnia_update.html").delete();
+        }
+
+        // Играет звук из assets через нативный Android MediaPlayer — минуя
+        // WebView autoplay-ограничения (которые блокируют Audio/AudioContext
+        // без пользовательского жеста). Используется для звуков загрузочной
+        // анимации, которые должны играть без тапа.
+        // delayMs — задержка в миллисекундах от момента вызова.
+        @JavascriptInterface
+        public void scheduleSound(final String filename, final int delayMs) {
+            new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        if (delayMs > 0) Thread.sleep(delayMs);
+                        android.media.MediaPlayer mp = new android.media.MediaPlayer();
+                        android.content.res.AssetFileDescriptor afd =
+                            activity.getAssets().openFd(filename);
+                        mp.setDataSource(
+                            afd.getFileDescriptor(),
+                            afd.getStartOffset(),
+                            afd.getLength()
+                        );
+                        afd.close();
+                        mp.prepare();
+                        mp.setOnCompletionListener(new android.media.MediaPlayer.OnCompletionListener() {
+                            public void onCompletion(android.media.MediaPlayer p) {
+                                p.release();
+                            }
+                        });
+                        mp.start();
+                    } catch (Exception e) {
+                        // Файл не найден или MediaPlayer недоступен — тихо игнорируем
+                    }
+                }
+            }).start();
+        }
+
+        // Пикер без фильтра по типу — для выбора любых файлов (в т.ч. HTML).
+        // Используется при публикации обновления (index.html не является
+        // image/* или video/*, поэтому обычный pickStoreFile его не видит).
+        @JavascriptInterface
+        public void pickAnyFile() {
+            activity.runOnUiThread(new Runnable() {
+                public void run() {
+                    // Пробуем несколько стратегий по очереди — Samsung по-разному
+                    // реагирует на разные Intent в зависимости от версии OneUI.
+                    boolean started = false;
+                    // Стратегия 1: ACTION_OPEN_DOCUMENT с */* и SHOW_ADVANCED флагами
+                    if (!started) {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                            intent.setType("*/*");
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            intent.putExtra("android.provider.extra.SHOW_ADVANCED", true);
+                            intent.putExtra("android.content.extra.SHOW_ADVANCED", true);
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                            activity.startActivityForResult(intent, SAF_PICK_STORE_FILE_CODE);
+                            started = true;
+                        } catch (Exception e) { /* попробуем следующую стратегию */ }
+                    }
+                    // Стратегия 2: ACTION_GET_CONTENT без chooser-обёртки
+                    if (!started) {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                            intent.setType("*/*");
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            activity.startActivityForResult(intent, SAF_PICK_STORE_FILE_CODE);
+                            started = true;
+                        } catch (Exception e) { /* попробуем следующую стратегию */ }
+                    }
+                    // Стратегия 3: через createChooser как запасной вариант
+                    if (!started) {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                            intent.setType("text/html");
+                            activity.startActivityForResult(
+                                Intent.createChooser(intent, "Select index.html"),
+                                SAF_PICK_STORE_FILE_CODE
+                            );
+                        } catch (Exception e) {
+                            android.widget.Toast.makeText(activity,
+                                "File picker unavailable", android.widget.Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                }
+            });
+        }
+
+        public void pickStoreFile() {
+            activity.runOnUiThread(new Runnable() {
+				public void run() {
+					try {
+						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+						intent.setType("*/*");
+						intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+						intent.addCategory(Intent.CATEGORY_OPENABLE);
+						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+						activity.startActivityForResult(intent, SAF_PICK_STORE_FILE_CODE);
+					} catch (Exception e) {
+						android.widget.Toast.makeText(activity,
+													"Cannot open file picker: " + e.getMessage(),
+													android.widget.Toast.LENGTH_LONG).show();
+					}
+				}
+			});
+        }
+
+        // Выбор фотографии для аватара аккаунта — только image/*, в отличие
+        // от pickStoreFile (который допускает и видео).
+        @JavascriptInterface
+        public void pickProfilePhoto() {
+            activity.runOnUiThread(new Runnable() {
+				public void run() {
+					try {
+						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+						intent.setType("image/*");
+						intent.addCategory(Intent.CATEGORY_OPENABLE);
+						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+						activity.startActivityForResult(intent, SAF_PICK_PROFILE_PHOTO_CODE);
+					} catch (Exception e) {
+						android.widget.Toast.makeText(activity,
+													"Cannot open file picker: " + e.getMessage(),
+													android.widget.Toast.LENGTH_LONG).show();
+					}
+				}
+			});
+        }
+
+        // Выбор картинки для новости в Admin Panel — та же логика, что у
+        // pickProfilePhoto (только image/*, свой код запроса/событие).
+        // Раньше кнопка "Выберите файл" там вообще ничего не делала —
+        // <input type="file"> без нативного SAF-пикера тут не работает.
+        @JavascriptInterface
+        public void pickNewsImage() {
+            activity.runOnUiThread(new Runnable() {
+				public void run() {
+					try {
+						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+						intent.setType("image/*");
+						intent.addCategory(Intent.CATEGORY_OPENABLE);
+						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+						activity.startActivityForResult(intent, SAF_PICK_NEWS_IMAGE_CODE);
+					} catch (Exception e) {
+						android.widget.Toast.makeText(activity,
+													"Cannot open file picker: " + e.getMessage(),
+													android.widget.Toast.LENGTH_LONG).show();
+					}
+				}
+			});
+        }
+
+        // Выбор файла ЛЮБОГО типа для отправки в чат X Forum — своя копия
+        // логики (не переиспользую pickAnyFile, у него общий requestCode с
+        // публикацией обновлений — здесь нужен отдельный, чтобы события не
+        // путались между собой).
+        @JavascriptInterface
+        public void pickForumFile() {
+            activity.runOnUiThread(new Runnable() {
+				public void run() {
+					try {
+						Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+						intent.setType("*/*");
+						intent.addCategory(Intent.CATEGORY_OPENABLE);
+						intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+									| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+						activity.startActivityForResult(intent, SAF_PICK_FORUM_FILE_CODE);
+					} catch (Exception e) {
+						android.widget.Toast.makeText(activity,
+											"Cannot open file picker: " + e.getMessage(),
+											android.widget.Toast.LENGTH_LONG).show();
+					}
+				}
+			});
+        }
+        @JavascriptInterface
+        public void pickWallpaperFile() {
+            activity.runOnUiThread(new Runnable() {
+					public void run() {
+						try {
+							Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+							intent.setType("*/*");
+							intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+							intent.addCategory(Intent.CATEGORY_OPENABLE);
+							intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+											| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+							activity.startActivityForResult(intent, SAF_PICK_WALLPAPER_FILE_CODE);
+						} catch (Exception e) {
+							android.widget.Toast.makeText(activity,
+														  "Cannot open file picker: " + e.getMessage(),
+														  android.widget.Toast.LENGTH_LONG).show();
+						}
+					}
+				});
+        }
+
+        // Открывает системный диалог голосового ввода (Android RecognizerIntent) —
+        // встроен в ОС через Google app на большинстве устройств, не требует
+        // собственного UI или сетевого кода с нашей стороны. Результат приходит
+        // в onActivityResult → notifyJs("onVoiceInputResult", text).
+        @JavascriptInterface
+        public void startVoiceInput() {
+            activity.runOnUiThread(new Runnable() {
+					public void run() {
+						try {
+							Intent intent = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+							intent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+											android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+							// Без явного EXTRA_LANGUAGE — распознаватель использует текущий
+							// язык устройства, что для русско- и англоязычных пользователей
+							// работает корректно без доп. настройки с нашей стороны.
+							intent.putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Говорите...");
+							// Проверяем, что на устройстве вообще есть кто отвечать на этот
+							// интент (не на всех устройствах без Google-сервисов есть
+							// распознаватель речи) — иначе startActivityForResult бросит
+							// ActivityNotFoundException и приложение крашнется.
+							if (intent.resolveActivity(activity.getPackageManager()) != null) {
+								activity.startActivityForResult(intent, VOICE_INPUT_REQUEST_CODE);
+							} else {
+								notifyJs("onVoiceInputUnavailable", "");
+							}
+						} catch (Exception e) {
+							notifyJs("onVoiceInputUnavailable", "");
+						}
+					}
+				});
+        }
+
+
+        // Возвращает JSON массив: [{"index":0,"name":"Internal Storage"}, ...]
+		 @JavascriptInterface
+        public String listRoots() {
+            java.util.List<String> uris = getValidTreeUris();
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < uris.size(); i++) {
+                if (i > 0) sb.append(",");
+                String name = "Folder " + (i+1);
+                try {
+                    Uri treeUri = Uri.parse(uris.get(i));
+                    String[] resolved = resolvePath(treeUri, "");
+                    if (resolved != null) {
+                        Uri rootUri = Uri.parse(resolved[0]);
+                        Cursor c = activity.getContentResolver().query(
+                            rootUri, new String[]{ COL_NAME }, null, null, null
+                        );
+                        if (c != null) {
+                            try {
+                                if (c.moveToFirst()) {
+                                    String n = c.getString(c.getColumnIndex(COL_NAME));
+                                    if (n != null && !n.isEmpty()) name = n;
+                                }
+                            } finally { c.close(); }
+                        }
+                    }
+                } catch (Exception e) { /* keep default name */ }
+                sb.append("{\"index\":").append(i)
+					.append(",\"name\":\"").append(jsonEscape(name)).append("\"}");
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+
+        // Удаляет корень по индексу (освобождает разрешение)
+        @JavascriptInterface
+        public void removeRoot(int index) {
+            java.util.List<String> uris = activity.getTreeUriList();
+            if (index < 0 || index >= uris.size()) return;
+            String uri = uris.get(index);
+            activity.removeTreeUri(uri);
+        }
+
+        // Возвращает список валидных (всё ещё разрешённых) URI деревьев
+        private java.util.List<String> getValidTreeUris() {
+            java.util.List<String> raw = activity.getTreeUriList();
+            java.util.List<String> valid = new java.util.ArrayList<String>();
+            java.util.List<android.content.UriPermission> perms =
+                activity.getContentResolver().getPersistedUriPermissions();
+            for (String s : raw) {
+                try {
+                    Uri u = Uri.parse(s);
+                    for (android.content.UriPermission p : perms) {
+                        if (p.getUri().equals(u) && p.isReadPermission()) {
+                            valid.add(s);
+                            break;
+                        }
+                    }
+                } catch (Exception e) { /* skip invalid */ }
+            }
+            return valid;
+        }
+
+        // ── Парсинг пути с префиксом индекса дерева: "0:Pictures/photo.jpg" ──
+        // Возвращает [treeUriString, relativePath] или null если индекс некорректен.
+        // Путь без префикса "N:" интерпретируется как индекс 0 (обратная совместимость).
+        private String[] parseTreePath(String path) {
+            java.util.List<String> uris = getValidTreeUris();
+            if (uris.isEmpty()) return null;
+
+            int colonIdx = path.indexOf(':');
+            if (colonIdx > 0 && colonIdx <= 2) {
+                try {
+                    int idx = Integer.parseInt(path.substring(0, colonIdx));
+                    if (idx >= 0 && idx < uris.size()) {
+                        return new String[]{ uris.get(idx), path.substring(colonIdx + 1) };
+                    }
+                } catch (NumberFormatException e) { /* not a prefix, fall through */ }
+            }
+            // Без префикса — используем первый корень, путь как есть
+            return new String[]{ uris.get(0), path };
+        }
+
+        // Открывает файл через системное приложение (SAF content:// URI)
+        @JavascriptInterface
+        public void openFileWith(final String path) {
+            final String[] tp = parseTreePath(path);
+            if (tp == null) {
+                android.widget.Toast.makeText(activity, "No folder selected",
+											  android.widget.Toast.LENGTH_SHORT).show();
+                return;
+            }
+            final String treeUriStr = tp[0];
+            final String relPath = tp[1];
+            activity.runOnUiThread(new Runnable() {
+					public void run() {
+						try {
+							Uri treeUri = Uri.parse(treeUriStr);
+							String[] resolved = resolvePath(treeUri, relPath);
+							if (resolved == null) {
+								android.widget.Toast.makeText(activity, "File not found",
+															  android.widget.Toast.LENGTH_SHORT).show();
+								return;
+							}
+							Uri fileUri = Uri.parse(resolved[0]);
+							String mime = resolved[1];
+							if (mime == null || mime.isEmpty() || DIR_MIME.equals(mime)) {
+								mime = getMimeFromName(relPath);
+							}
+
+							Intent intent = new Intent(Intent.ACTION_VIEW);
+							intent.setDataAndType(fileUri, mime);
+							intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+							intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+							activity.startActivity(Intent.createChooser(intent, "Open with"));
+						} catch (Exception e) {
+							android.widget.Toast.makeText(activity,
+														  "Cannot open: " + e.getMessage(),
+														  android.widget.Toast.LENGTH_LONG).show();
+						}
+					}
+				});
+        }
+
+        // ── Поделиться файлом через системный Android share-чузер ────────
+        // Используется когда пользователь перетаскивает файл на окно
+        // встроенного браузера, открытого на веб-Telegram (или любой другой
+        // сайт) — настоящий drag-and-drop с подхватом файла самой веб-страницей
+        // здесь невозможен (это два изолированных WebView, между которыми нет
+        // способа передать файловый DataTransfer), поэтому вместо имитации
+        // используется честный системный механизм: ACTION_SEND с выбором
+        // получателя. Если на устройстве установлен Telegram как нативное
+        // приложение, он появится в списке и реально получит файл; если нет —
+        // пользователь увидит обычный список приложений, способных принять файл
+        // (включая "Скопировать в", Bluetooth и т.п.).
+        @JavascriptInterface
+        public void shareFile(final String path) {
+            final String[] tp = parseTreePath(path);
+            if (tp == null) {
+                android.widget.Toast.makeText(activity, "No folder selected",
+											  android.widget.Toast.LENGTH_SHORT).show();
+                return;
+            }
+            final String treeUriStr = tp[0];
+            final String relPath = tp[1];
+            activity.runOnUiThread(new Runnable() {
+					public void run() {
+						try {
+							Uri treeUri = Uri.parse(treeUriStr);
+							String[] resolved = resolvePath(treeUri, relPath);
+							if (resolved == null) {
+								android.widget.Toast.makeText(activity, "File not found",
+															  android.widget.Toast.LENGTH_SHORT).show();
+								return;
+							}
+							if (DIR_MIME.equals(resolved[1])) {
+								android.widget.Toast.makeText(activity, "Cannot share a folder",
+															  android.widget.Toast.LENGTH_SHORT).show();
+								return;
+							}
+							Uri fileUri = Uri.parse(resolved[0]);
+							String mime = resolved[1];
+							if (mime == null || mime.isEmpty()) {
+								mime = getMimeFromName(relPath);
+							}
+
+							Intent intent = new Intent(Intent.ACTION_SEND);
+							intent.setType(mime);
+							intent.putExtra(Intent.EXTRA_STREAM, fileUri);
+							intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+							intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+							activity.startActivity(Intent.createChooser(intent, "Share via"));
+						} catch (Exception e) {
+							android.widget.Toast.makeText(activity,
+														  "Cannot share: " + e.getMessage(),
+														  android.widget.Toast.LENGTH_LONG).show();
+						}
+					}
+				});
+        }
+
+        private String getMimeFromName(String path) {
+            String name = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
+            String ext = name.contains(".")
+                ? name.substring(name.lastIndexOf('.') + 1).toLowerCase()
+                : "";
+            if (ext.equals("jpg") || ext.equals("jpeg")) return "image/jpeg";
+            if (ext.equals("png"))  return "image/png";
+            if (ext.equals("gif"))  return "image/gif";
+            if (ext.equals("webp")) return "image/webp";
+            if (ext.equals("mp3"))  return "audio/mpeg";
+            if (ext.equals("wav"))  return "audio/wav";
+            if (ext.equals("mp4"))  return "video/mp4";
+            if (ext.equals("mkv"))  return "video/x-matroska";
+            if (ext.equals("pdf"))  return "application/pdf";
+            if (ext.equals("apk"))  return "application/vnd.android.package-archive";
+            if (ext.equals("txt") || ext.equals("log")) return "text/plain";
+            if (ext.equals("html") || ext.equals("htm")) return "text/html";
+            if (ext.equals("json")) return "application/json";
+            return "*/*";
+        }
+    }
+}
