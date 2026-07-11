@@ -1041,37 +1041,74 @@ public class MainActivity extends Activity {
             if (v != null) v.vibrate(ms);
         }
 
-        // ── Переключение раскладки клавиатуры ────────────────────────────
-        // Первая версия использовала InputMethodManager.switchToNextInputMethod
-        // с onlyCurrentIme=true — это переключает подтип ИМЕННО текущей
-        // клавиатуры (например RU→EN), но только если сама клавиатура
-        // регистрирует эти языки в системе как отдельные InputMethodSubtype.
-        // Gboard так делает, но НЕ ВСЕ клавиатуры — например Яндекс.Клавиатура
-        // часто переключает язык собственной внутренней логикой (кнопка-глобус,
-        // свайп по пробелу), не всегда объявляя эти языки системе — тогда
-        // switchToNextInputMethod находит ровно ОДИН подтип и просто
-        // возвращает на него же, то есть визуально "ничего не происходит"
-        // (подтверждено пользователем на реальном устройстве с Яндекс
-        // Клавиатурой). showInputMethodPicker() — единственный способ,
-        // гарантированно работающий вне зависимости от того, как конкретное
-        // приложение-клавиатура устроено внутри: это тот же системный
-        // диалог выбора клавиатуры/языка, что открывается долгим тапом на
-        // иконку клавиатуры в панели навигации Android. Отличие от Windows
-        // в том, что тут показывается список (тап занимает лишний шаг),
-        // а не мгновенный тумблер — но зато работает всегда и со всеми
-        // клавиатурами, не только с Gboard.
+        // ── Настоящий выход из приложения — "Выключить систему" в XomniaOS ──
+        // finishAndRemoveTask() убирает и саму Activity, и её карточку из
+        // списка "последние приложения" Android — ближе всего к ощущению
+        // "телефон выключился", чем обычный finish() (который просто закрыл
+        // бы Activity, но оставил бы карточку висеть в списке недавних).
+        // Доступен с API 21, так что можно без проверки версии.
+        @JavascriptInterface
+        public void exitApp() {
+            activity.runOnUiThread(new Runnable() {
+                public void run() {
+                    activity.finishAndRemoveTask();
+                }
+            });
+        }
+
+        // ── Переключение раскладки клавиатуры — своя логика под конкретную
+        // активную клавиатуру, а не одна попытка "на удачу". Определяем,
+        // какая клавиатура сейчас выбрана по умолчанию (Settings.Secure.
+        // DEFAULT_INPUT_METHOD), и ветвимся:
+        //
+        // • Gboard и любая другая клавиатура, регистрирующая языки в
+        //   системе как отдельные InputMethodSubtype — используем
+        //   switchToNextInputMethod(token, true): мгновенное переключение
+        //   без диалога, именно так работает Shift+Alt в Windows.
+        //
+        // • Яндекс.Клавиатура — по официальной документации Яндекса
+        //   (yandex.com/support/keyboard-android) переключение языка
+        //   делается ТОЛЬКО свайпом по пробелу влево/вправо внутри самой
+        //   клавиатуры — это её собственный внутренний жест, никакого
+        //   публичного intent/API для внешнего вызова она не предоставляет.
+        //   Значит подделать "мгновенное переключение" для неё честно
+        //   нельзя — вместо этого показываем точную инструкцию, что именно
+        //   нужно сделать, одним тостом, а не молчим и не показываем
+        //   бесполезный список приложений-клавиатур.
+        //
+        // Если активна какая-то ДРУГАЯ клавиатура (не Gboard и не Яндекс) —
+        // всё равно пробуем switchToNextInputMethod (сработает для всех,
+        // кто поддерживает InputMethodSubtype — Samsung Keyboard, SwiftKey
+        // и т.д.), и если метод честно сообщает "нечего переключать" —
+        // сообщаем в JS через onKeyboardSwitchUnsupported.
         @JavascriptInterface
         public void switchKeyboardLayout() {
             activity.runOnUiThread(new Runnable() {
                 public void run() {
                     try {
+                        String currentIme = android.provider.Settings.Secure.getString(
+                            activity.getContentResolver(),
+                            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD
+                        );
+                        boolean isYandex = currentIme != null && currentIme.toLowerCase().contains("yandex");
+
+                        if (isYandex) {
+                            activity.notifyJs("onKeyboardSwitchYandexHint", "");
+                            return;
+                        }
+
                         android.view.inputmethod.InputMethodManager imm =
                             (android.view.inputmethod.InputMethodManager)
                             activity.getSystemService(INPUT_METHOD_SERVICE);
                         if (imm == null) return;
-                        imm.showInputMethodPicker();
+                        android.os.IBinder token = activity.getWindow().getDecorView().getWindowToken();
+                        if (token == null) return;
+                        boolean switched = imm.switchToNextInputMethod(token, true);
+                        if (!switched) {
+                            activity.notifyJs("onKeyboardSwitchUnsupported", "");
+                        }
                     } catch (Exception e) {
-                        // На части прошивок этот вызов может отсутствовать —
+                        // На части прошивок этот вызов может отсутствовать/падать —
                         // тогда просто ничего не происходит, без краша приложения.
                     }
                 }
